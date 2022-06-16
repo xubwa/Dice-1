@@ -28,6 +28,7 @@ Dice
 *.swp
 *.doctree
 *.bkp
+input*
 output*.dat
 tests/mn_really_quick
 tests/*/shci.e

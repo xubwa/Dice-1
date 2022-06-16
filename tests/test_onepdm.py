@@ -50,8 +50,7 @@ def test1RDM(file1: str, file2: str, tol: float):
         )
         print(msg)
 
-
-if __name__ == "__main__":
+if __name__=="__main__":
     import sys
 
     test1RDM(sys.argv[1], sys.argv[2], float(sys.argv[3]))
