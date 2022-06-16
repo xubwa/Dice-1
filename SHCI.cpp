@@ -28,7 +28,8 @@
 #include <list>
 #include <set>
 #include <tuple>
-
+#include <thread>
+#include <chrono>
 #include "Davidson.h"
 #include "Determinants.h"
 #include "Hmult.h"
@@ -60,7 +61,8 @@
 #include "symmetry.h"
 MatrixXd symmetry::product_table;
 #include <algorithm>
-
+#include <boost/bind.hpp>
+#include "cdfci.h"
 // Initialize
 using namespace Eigen;
 using namespace boost;
@@ -127,7 +129,7 @@ void license(char* argv[]) {
   printf("Commit:           %s\n", git_commit);
   printf("Branch:           %s\n", git_branch);
   printf("Compilation Date: %s %s\n", __DATE__, __TIME__);
-  // printf("Cores:            %s\n","TODO");
+  //printf("Cores:            %s\n","TODO");
 }
 
 // Read Input
@@ -213,18 +215,6 @@ int main(int argc, char* argv[]) {
     pout << "The number of electrons given in the FCIDUMP should be";
     pout << " equal to the nocc given in the shci input file." << endl;
     exit(0);
-  }
-
-  // LCC
-  if (schd.doLCC) {
-    // no nact was given in the input file
-    if (schd.nact == 1000000)
-      schd.nact = norbs - schd.ncore;
-    else if (schd.nact + schd.ncore > norbs) {
-      pout << "core + active orbitals = " << schd.nact + schd.ncore;
-      pout << " greater than orbitals " << norbs << endl;
-      exit(0);
-    }
   }
 
   // Setup the lexical table for the determinants
@@ -347,26 +337,45 @@ int main(int argc, char* argv[]) {
           Dets.at(d) = tempDets.at(d);
         }
 
-        // Same for irrep
-        if (molSym.targetIrrep != molSym.getDetSymmetry(Dets[d])) {
-          Dets.at(d) = tempDets.at(d);
-          pout << "WARNING: Given determinants have different irrep than the "
-                  "target irrep\n\tspecified. Using the specified irrep."
-               << endl;
-        }
+  symmetry molSym(schd.pointGroup, irrep);
+  if (schd.pointGroup != "dooh" && schd.pointGroup != "coov" &&
+      molSym.init_success) {
+    vector<Determinant> tempDets(Dets);
+    bool spin_specified = true;
+    if (schd.spin == -1) {  // Set spin if none specified by user
+      spin_specified = false;
+      schd.spin = Dets[0].Nalpha() - Dets[0].Nbeta();
+      // pout << "Setting spin to " << schd.spin << endl;
+    }
+    for (int d = 0; d < HFoccupied.size(); d++) {
+      // Guess the lowest energy det with given symmetry from one body
+      // integrals.
+      molSym.estimateLowestEnergyDet(schd.spin, schd.irrep, I1, irrep,
+                                     HFoccupied.at(d), tempDets.at(d));
 
-        for (int cd = 0; cd < tempDets.size(); cd++) {
-          if (tempDets.at(d).connected(tempDets.at(cd))) {
-            bool correct_spin = abs(tempDets.at(cd).Nalpha() -
-                                    tempDets.at(cd).Nbeta()) == schd.spin;
-            if (correct_spin) {
-              bool lower_energy = Dets.at(d).Energy(I1, I2, coreE) >
-                                  tempDets.at(cd).Energy(I1, I2, coreE);
-              bool correct_irrep =
-                  molSym.getDetSymmetry(tempDets.at(cd)) == molSym.targetIrrep;
-              if (lower_energy && correct_irrep) {
-                Dets.at(d) = tempDets.at(cd);
-              }
+      // Generate list of connected determinants to guess determinant.
+      SHCIgetdeterminants::getDeterminantsVariational(
+          tempDets.at(d), 0.00001, 1, 0.0, I1, I2, I2HBSHM, irrep, coreE, 0,
+          tempDets, schd, 0, nelec);
+
+      // If spin is specified we assume the user wants a particular determinant
+      // even if it's higher in energy than the HF so we keep it. If the user
+      // didn't specify then we keep the lowest energy determinant
+      // Check all connected and find lowest energy.
+      int spin_HF = Dets[d].Nalpha() - Dets[d].Nbeta();
+      if (spin_specified && spin_HF != schd.spin) {
+        Dets.at(d) = tempDets.at(0);
+      }
+      for (int cd = 0; cd < tempDets.size(); cd++) {
+        if (tempDets.at(d).connected(tempDets.at(cd))) {
+          if (abs(tempDets.at(cd).Nalpha() - tempDets.at(cd).Nbeta()) ==
+              schd.spin) {
+            char repArray[tempDets.at(cd).norbs];
+            tempDets.at(cd).getRepArray(repArray);
+            if (Dets.at(d).Energy(I1, I2, coreE) >
+                    tempDets.at(cd).Energy(I1, I2, coreE) &&
+                molSym.getSymmetry(repArray, irrep) == schd.irrep) {
+              Dets.at(d) = tempDets.at(cd);
             }
           }
         }  // end cd
@@ -403,11 +412,23 @@ int main(int argc, char* argv[]) {
   pout << "**************************************************************"
        << endl;
 
-  vector<double> E0 = SHCIbasics::DoVariational(
+  vector<double> E0;
+  if (schd.cdfci_on == 0 && schd.restart) {
+    cdfci::sequential_solve(schd, I1, I2, I2HBSHM, irrep, coreE, E0, ci, Dets);
+    exit(0);
+  }
+  E0 = SHCIbasics::DoVariational(
       ci, Dets, schd, I2, I2HBSHM, irrep, I1, coreE, nelec, schd.DoRDM);
   Determinant* SHMDets;
   SHMVecFromVecs(Dets, SHMDets, shciDetsCI, DetsCISegment, regionDetsCI);
   int DetsSize = Dets.size();
+
+  cout << Dets.size() << endl;
+
+  if (schd.cdfci_on > 0 && schd.cdfci_on < schd.epsilon1.size()) {
+    cdfci::solve(schd, I1, I2, I2HBSHM, irrep, coreE, E0, ci, Dets);
+  }
+
 #ifndef SERIAL
   mpi::broadcast(world, DetsSize, 0);
 #endif
@@ -656,19 +677,7 @@ root1, Heff(root1,root1), Heff(root2, root2), Heff(root1, root2), spinRDM);
     // SOChelper::doGTensor(ci, Dets, E0, norbs, nelec, spinRDM);
     return 0;
 #endif
-  } else if (schd.doLCC) {
-    log_pt(schd);
-#ifndef Complex
-    for (int root = 0; root < schd.nroots; root++) {
-      CItype* ciroot;
-      SHMVecFromMatrix(ci[root], ciroot, shcicMax, cMaxSegment, regioncMax);
-      LCC::doLCC(SHMDets, ciroot, DetsSize, E0[root], I1, I2, I2HBSHM, irrep,
-                 schd, coreE, nelec, root);
-    }
-#else
-    pout << " Not for Complex" << endl;
-#endif
-  } else if (!schd.stochastic && schd.nblocks == 1) {
+  }  else if (!schd.stochastic && schd.nblocks == 1) {
     log_pt(schd);
     double ePT = 0.0;
     std::string efile;
@@ -840,9 +849,8 @@ root1, Heff(root1,root1), Heff(root2, root2), Heff(root1, root2), spinRDM);
         schd.fullrestart = false;
         schd.DoRDM = false;
         E0 = SHCIbasics::DoVariational(ci, Dets, schd, I2, I2HBSHM, irrep, I1,
-                                       coreE, nelec, false);
+                                       coreE, nelec, schd.DoRDM);
         var[iter + 1] = E0[0];
-
         DetsSize = Dets.size();
 #ifndef SERIAL
         mpi::broadcast(world, DetsSize, 0);

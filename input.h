@@ -102,7 +102,11 @@ struct schedule {
     & restrictionsV                           \
     & restrictionsPT                          \
     & Bvalue                                  \
-    & Bdirection;
+    & Bdirection
+    & cdfciIter                               \
+    & z_threshold                             \
+    & max_determinants                        \
+    & restrictions;
   }
   // clang-format on
 
@@ -175,6 +179,17 @@ struct schedule {
   //apply external magnetic field
   double Bvalue;  //magnitude of magnetic field
   vector<double> Bdirection; //direction e.g. 1 0 0 mean it is along x-axis
+
+  // used by cdfci
+  double z_threshold;
+  int cdfci_on;
+  int cdfciIter;
+  int report_interval;
+  int max_determinants;
+  bool sampleNewDets;
+  bool precondition;
+  double cdfciTol;
+  vector<OccRestrictions> restrictions;
 };
 
 #endif
